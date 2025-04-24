@@ -1,11 +1,17 @@
 #include <chrono>
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_audio.h>
 #include <unordered_map>
 #include <thread>
 #include <iostream>
 #include <string>
 #include "chip8.h"
 
+
+const int AUDIO_FREQUENCY = 44100;
+const int AUDIO_SAMPLES = 1024;
+const int TONE_HZ = 440;
+const Sint16 AUDIO_AMPLITUDE = 3000; 
 const int SCREEN_SCALE = 25; // fator de escala
 const int SDL_WINDOW_WIDTH  =  DISPLAY_WIDTH * SCREEN_SCALE;
 const int SDL_WINDOW_HEIGHT =  DISPLAY_HEIGHT * SCREEN_SCALE;
@@ -13,6 +19,39 @@ const int SDL_WINDOW_HEIGHT =  DISPLAY_HEIGHT * SCREEN_SCALE;
 //cores da janela
 const SDL_Color COLOR_BACKGROUND = {0, 0, 0, 255};       // Preto
 const SDL_Color COLOR_FOREGROUND = {255, 97, 0, 1};
+
+
+struct AudioState {
+    bool is_beeping = false;
+    double wave_pos = 0.0;
+    int samples_per_wave = 0;
+};
+
+void SDLCALL audioCallback (void* userdata, Uint8* stream, int len){
+    AudioState* audio_state = static_cast<AudioState*>(userdata);
+    Sint16* buffer = reinterpret_cast<Sint16*>(stream);
+    int length = len / sizeof(Sint16);
+
+    if(audio_state == nullptr || audio_state->samples_per_wave == 0){
+        SDL_memset(stream, 0, len);
+        return;
+    }
+
+    for(int i = 0; i < length; ++i){
+        if (audio_state->is_beeping){
+            buffer[i] = (audio_state->wave_pos < audio_state->samples_per_wave / 2.0) ? AUDIO_AMPLITUDE : -AUDIO_AMPLITUDE;
+        } else {
+            buffer[i] = 0;
+        }
+
+        audio_state->wave_pos += 1.0;
+        if(audio_state->wave_pos >= audio_state->samples_per_wave) {
+            audio_state->wave_pos -= audio_state->samples_per_wave;
+        }
+    }
+
+}
+
 
 int main(int argc, char* argv[]){
 
@@ -65,6 +104,36 @@ int main(int argc, char* argv[]){
     std::cout << "SDL inicializado com sucesso." << std::endl;
     std::cout << "Janela: " << SDL_WINDOW_WIDTH << "x" << SDL_WINDOW_HEIGHT << " (Escala: " << SCREEN_SCALE << "x)" << std::endl;
 
+
+    AudioState audio_state;
+    audio_state.samples_per_wave = AUDIO_FREQUENCY / TONE_HZ;
+
+    SDL_AudioSpec want, have;
+    SDL_AudioDeviceID audio_device;
+
+    SDL_zero(want);
+
+    want.freq = AUDIO_FREQUENCY;
+    want.format = AUDIO_S16SYS;
+
+    want.channels = 1;
+    want.samples = AUDIO_SAMPLES;
+    want.callback = audioCallback;
+    want.userdata = &audio_state;
+
+    audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+
+    if (audio_device == 0){
+        std::cerr << "Erro ao abrir o dispositivo de audio: " << SDL_GetError() << std::endl;
+    } else {
+        if(want.format != have.format) {
+            std::cerr << "aviso: formato de audio nao suportado" << std::endl;
+        }
+
+        std::cout << "dispositivo de audio aberto. Freq: " << have.freq << std::endl;
+
+        SDL_PauseAudioDevice(audio_device, 0);
+    }
 
     // --------- instancia chip8 ---------------
     Chip8 chip8_instance;
@@ -154,10 +223,17 @@ int main(int argc, char* argv[]){
         Duration elapsed_since_last_timer = current_time - last_timer_update_time;
         if (elapsed_since_last_timer >= timer_interval) {
             chip8_instance.updateTimers();
-            last_timer_update_time = last_timer_update_time + std::chrono::duration_cast<Clock::duration>(timer_interval);
+            bool should_beep_now = (chip8_instance.getSoundTimer() > 0);
+            if (audio_device != 0){
+                SDL_LockAudioDevice(audio_device);
 
-            //Lógica de Áudio (Beep) aqui
+                audio_state.is_beeping = should_beep_now;
+
+                SDL_UnlockAudioDevice(audio_device);
+            }
+            last_timer_update_time = last_timer_update_time + std::chrono::duration_cast<Clock::duration>(timer_interval);
         }
+
 
 
         // --- executar os ciclos do chip-8  ---
